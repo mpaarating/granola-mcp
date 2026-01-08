@@ -157,6 +157,10 @@ class CalendarAttendee(BaseModel):
     responseStatus: str
     self: bool | None = None
     displayName: str | None = None
+    organizer: bool | None = None
+    resource: bool | None = None  # True for room/resource attendees
+    comment: str | None = None  # Attendee comment (e.g., OOO message)
+    optional: bool | None = None  # True if attendee is optional
 
 
 class ConferenceEntryPoint(BaseModel):
@@ -164,6 +168,15 @@ class ConferenceEntryPoint(BaseModel):
 
     entryPointType: str
     uri: str
+    label: str | None = None
+    pin: str | None = None
+    regionCode: str | None = None
+
+
+class ConferenceSolutionKey(BaseModel):
+    """Key identifying the conference solution type."""
+
+    type: str  # e.g., "hangoutsMeet"
 
 
 class ConferenceSolution(BaseModel):
@@ -171,6 +184,21 @@ class ConferenceSolution(BaseModel):
 
     name: str
     iconUri: str
+    key: ConferenceSolutionKey | None = None
+
+
+class ConferenceCreateRequestStatus(BaseModel):
+    """Status of conference create request."""
+
+    statusCode: str  # e.g., "success"
+
+
+class ConferenceCreateRequest(BaseModel):
+    """Conference creation request details."""
+
+    status: ConferenceCreateRequestStatus
+    requestId: str
+    conferenceSolutionKey: ConferenceSolutionKey
 
 
 class ConferenceData(BaseModel):
@@ -178,6 +206,8 @@ class ConferenceData(BaseModel):
 
     entryPoints: Sequence[ConferenceEntryPoint]
     conferenceSolution: ConferenceSolution
+    conferenceId: str | None = None
+    createRequest: ConferenceCreateRequest | None = None
 
 
 class DocumentAttachment(BaseModel):

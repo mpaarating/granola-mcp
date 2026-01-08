@@ -13,7 +13,9 @@
       "mcp__granola__download_private_notes",
       "mcp__granola__resolve_url",
       "mcp__granola__list_deleted_meetings",
-      "mcp__granola__list_workspaces"
+      "mcp__granola__list_workspaces",
+      "Bash(uvx ruff check:*)",
+      "Bash(uvx ruff format:*)"
     ],
     "deny": [],
     "ask": []

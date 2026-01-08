@@ -273,7 +273,8 @@ class LastViewedPanel(BaseModel):
     original_content: str | None = None
     suggested_questions: None = None
     generated_lines: Sequence[GeneratedLine] | None = None
-    ydoc_state: None = None
+    ydoc_state: str | None = None  # Y.js document state
+    ydoc_version: int | None = None  # Y.js document version
 
 
 # Main document model
@@ -421,7 +422,7 @@ class DocumentPanel(BaseModel):
     suggested_questions: Sequence[str] | None = None
     generated_lines: Sequence[GeneratedLine] | None = None
     user_feedback: None = None
-    ydoc_version: None = None
+    ydoc_version: int | None = None  # Y.js document version
 
 
 class NoteDownloadResult(BaseModel):
@@ -496,15 +497,16 @@ class WorkspaceData(BaseModel):
     pre_call_email_enabled: bool
     affirmative_consent_enabled: bool
     in_meeting_copy_consent_message_banner_enabled: bool
+    in_meeting_copy_consent_message_banner_message: str | None = None
     calendar_addon_api_key: str | None
     allow_transfer_notes: bool
     discoverable: bool
     chat_paste_enabled: bool
+    allow_data_export: bool = True
     self_email_enabled: bool
     pre_call_email_blocklist: Sequence[str]
     pre_call_email_allowlist: Sequence[str]
     pre_call_email_large_meeting_threshold: int
-    in_meeting_copy_consent_message_banner_message: str | None
 
 
 class WorkspaceItem(BaseModel):

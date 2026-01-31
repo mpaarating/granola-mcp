@@ -363,6 +363,9 @@ class GranolaDocument(BaseModel):
     was_trashed: bool | None = (
         None  # New field - indicates if document was previously trashed
     )
+    is_primary_event_note: bool | None = None  # Primary note for calendar event
+    ydoc_state: str | None = None  # Y.js document state
+    ydoc_version: int | None = None  # Y.js document version
 
 
 class DocumentsResponse(BaseModel):

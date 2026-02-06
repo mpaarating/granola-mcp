@@ -15,7 +15,8 @@
       "mcp__granola__list_deleted_meetings",
       "mcp__granola__list_workspaces",
       "Bash(uvx ruff check:*)",
-      "Bash(uvx ruff format:*)"
+      "Bash(uvx ruff format:*)",
+      "Bash(find:*)"
     ],
     "deny": [],
     "ask": []

@@ -158,7 +158,6 @@ def prosemirror_to_markdown(content: dict, depth: int = 0) -> str:
     if node_type == 'bulletList':
         items = content.get('content', [])
         lines = []
-        indent = '  ' * depth
         for item in items:
             if item.get('type') == 'listItem':
                 item_lines = process_list_item(item, depth)
@@ -169,7 +168,6 @@ def prosemirror_to_markdown(content: dict, depth: int = 0) -> str:
     if node_type == 'orderedList':
         items = content.get('content', [])
         lines = []
-        indent = '  ' * depth
         for i, item in enumerate(items, 1):
             if item.get('type') == 'listItem':
                 item_lines = process_list_item(item, depth, ordered=i)

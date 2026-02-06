@@ -296,9 +296,9 @@ class LastViewedPanel(BaseModel):
     content: ProseMirrorDoc | str  # ProseMirror JSON or HTML
     deleted_at: None = None
     template_slug: str
-    last_viewed_at: str
-    updated_at: str
-    content_updated_at: str
+    last_viewed_at: str | None = None
+    updated_at: str | None = None
+    content_updated_at: str | None = None
     affinity_note_id: None = None
     original_content: str | None = None
     suggested_questions: None = None
@@ -368,15 +368,31 @@ class GranolaDocument(BaseModel):
     ydoc_version: int | None = None  # Y.js document version
 
 
-class DocumentsResponse(BaseModel):
-    """Response from get-documents API."""
+class DocumentSetEntry(BaseModel):
+    """Lightweight entry in the document set index.
 
-    docs: Sequence[GranolaDocument]
-    deleted: Sequence[str]
+    Each entry has exactly one of `owner` or `shared` set to True.
+    The absent field is not present in the response (defaults to None).
+    """
+
+    updated_at: str
+    owner: bool | None = None
+    shared: bool | None = None
+    has_ydoc: bool | None = None
+
+
+class DocumentSetResponse(BaseModel):
+    """Response from POST /v1/get-document-set.
+
+    Returns a lightweight index of ALL documents (owned + shared + deleted).
+    No pagination -- single call returns everything.
+    """
+
+    documents: Mapping[str, DocumentSetEntry]
 
 
 class BatchDocumentsResponse(BaseModel):
-    """Response from get-documents-batch API (no deleted array)."""
+    """Response from get-documents-batch API."""
 
     docs: Sequence[GranolaDocument]
 
@@ -402,6 +418,7 @@ class MeetingListItem(BaseModel):
     type: str | None
     has_notes: bool
     participant_count: int
+    is_shared: bool
     participants: Sequence[ParticipantInfo] | None = pydantic.Field(
         default=None, exclude_if=lambda v: v is None
     )

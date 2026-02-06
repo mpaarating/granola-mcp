@@ -19,12 +19,12 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import re
 import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
 import httpx
 from aiocache import Cache, cached
@@ -46,13 +46,12 @@ from src.models import (
     DeleteMeetingResult,
     DeleteWorkspaceResult,
     DocumentPanel,
-    DocumentsResponse,
+    DocumentSetResponse,
     ListWorkspacesResult,
     MeetingList,
     MeetingListItem,
     MeetingListsResult,
     NoteDownloadResult,
-    ParticipantInfo,
     PrivateNoteDownloadResult,
     ResolveUrlResult,
     TranscriptDownloadResult,
@@ -110,36 +109,85 @@ def _extract_document_id(url: str) -> str | None:
 
 
 @cached(ttl=None, cache=Cache.MEMORY)
-async def _get_documents_cached(
-    limit: int, offset: int, list_id: str | None = None
-) -> list:
+async def _get_document_set_cached() -> DocumentSetResponse:
     """
-    Fetch documents from API with automatic caching.
+    Fetch the lightweight document index (owned + shared + deleted).
 
-    Results are cached by (limit, offset, list_id) for the lifetime of the MCP server session.
-    Cache is cleared on server restart.
-
-    Args:
-        limit: Number of documents to fetch
-        offset: Pagination offset
-        list_id: Optional list ID filter
-
-    Returns:
-        List of GranolaDocument objects
+    Returns all document IDs with ownership flags and updated_at timestamps.
+    Cached for the lifetime of the MCP server session (cleared on restart).
     """
     headers = get_auth_headers()
-    url = 'https://api.granola.ai/v2/get-documents'
-
-    payload = {'limit': limit, 'offset': offset, 'include_last_viewed_panel': False}
-
-    if list_id:
-        payload['list_id'] = list_id
-
-    response = await _http_client.post(url, json=payload, headers=headers)
+    url = 'https://api.granola.ai/v1/get-document-set'
+    response = await _http_client.post(url, json={}, headers=headers)
     response.raise_for_status()
+    return DocumentSetResponse.model_validate(response.json())
 
-    data = DocumentsResponse.model_validate(response.json())
-    return data.docs
+
+# Per-document cache for batch fetch results (session lifetime)
+_document_cache: dict[str, object] = {}
+
+
+async def _get_documents_by_ids(document_ids: list[str]) -> list:
+    """
+    Fetch documents by IDs, using per-document cache.
+
+    Checks the cache first, only fetches uncached IDs from the API.
+    Stores results back into the cache for future calls.
+
+    Args:
+        document_ids: List of document IDs to fetch
+
+    Returns:
+        List of GranolaDocument objects (order not guaranteed)
+    """
+    # Split into cached and uncached
+    cached_docs = []
+    uncached_ids = []
+    for doc_id in document_ids:
+        if doc_id in _document_cache:
+            cached_docs.append(_document_cache[doc_id])
+        else:
+            uncached_ids.append(doc_id)
+
+    if not uncached_ids:
+        return cached_docs
+
+    # Fetch uncached in chunks of 200
+    fetched_docs = []
+    for chunk_start in range(0, len(uncached_ids), 200):
+        chunk_ids = uncached_ids[chunk_start : chunk_start + 200]
+        headers = get_auth_headers()
+        response = await _http_client.post(
+            'https://api.granola.ai/v1/get-documents-batch',
+            json={'document_ids': chunk_ids},
+            headers=headers,
+        )
+        response.raise_for_status()
+        data = BatchDocumentsResponse.model_validate(response.json())
+        for doc in data.docs:
+            _document_cache[doc.id] = doc
+            fetched_docs.append(doc)
+
+    return cached_docs + fetched_docs
+
+
+async def _get_document_by_id(document_id: str):
+    """
+    Fetch a single document by ID. Works for both owned and shared documents.
+
+    Args:
+        document_id: Granola document ID
+
+    Returns:
+        GranolaDocument
+
+    Raises:
+        ValueError: If document not found
+    """
+    docs = await _get_documents_by_ids([document_id])
+    if not docs:
+        raise ValueError(f'Document {document_id} not found')
+    return docs[0]
 
 
 @cached(ttl=86400, cache=Cache.MEMORY)  # 24 hour TTL - token mappings are stable
@@ -194,123 +242,157 @@ async def list_meetings(
     list_id: str | None = None,
     created_at_gte: str | None = None,
     created_at_lte: str | None = None,
+    source: Literal['all', 'owned', 'shared'] = 'all',
     # Control parameters
     limit: int = 20,
     include_participants: bool = False,
 ) -> list[MeetingListItem]:
     """
-    List Granola meetings with optional client-side filtering.
+    List Granola meetings with optional filtering.
 
-    Fetches meetings in batches of 40 (with caching) and filters by title and/or date.
-    The Granola API does not support server-side search, so filtering is done client-side.
-    Results are cached per pagination window for performance.
+    Uses the document set index to discover all meetings (owned + shared),
+    then batch-fetches full details. Results are cached per session.
 
     Args:
         title_contains: Optional substring to filter by title
         case_sensitive: Whether title filtering should be case-sensitive (default: False)
-        list_id: Optional list ID to filter meetings by list (server-side filtering)
-        limit: Maximum number of meetings to return. Use 0 to return all (default: 20)
+        list_id: Optional list ID to filter meetings by list (only works with source='owned')
         created_at_gte: Filter meetings created on or after this date (ISO 8601: "YYYY-MM-DD")
         created_at_lte: Filter meetings created on or before this date (ISO 8601: "YYYY-MM-DD")
+        source: Which meetings to include: 'all' (default), 'owned', or 'shared'
+        limit: Maximum number of meetings to return. Use 0 to return all (default: 20)
         include_participants: Include full participant details (default: False for efficiency)
 
     Returns:
         List of meetings with id, title, date, and metadata
     """
+    if list_id and source != 'owned':
+        raise ValueError("list_id filter is only supported with source='owned'")
 
-    async def document_generator():
-        """Async generator that yields documents in batches of 40."""
-        offset = 0
-        batch_size = 40
-        while True:
-            batch = await _get_documents_cached(
-                limit=batch_size, offset=offset, list_id=list_id
-            )
-            if not batch:
-                break
-            for doc in batch:
-                yield doc
-            offset += batch_size
+    # Get the lightweight document index
+    doc_set = await _get_document_set_cached()
 
+    # Filter by source and build sorted entry list
+    entries = []
+    for doc_id, entry in doc_set.documents.items():
+        is_shared = bool(entry.shared)
+        if source == 'owned' and is_shared:
+            continue
+        if source == 'shared' and not is_shared:
+            continue
+        entries.append((doc_id, entry.updated_at, is_shared))
+
+    # Sort by updated_at descending (most recent first)
+    entries.sort(key=lambda x: x[1], reverse=True)
+
+    # If list_id is specified, filter to only docs in that list
+    if list_id:
+        headers = get_auth_headers()
+        url = 'https://api.granola.ai/v1/get-document-lists-metadata'
+        payload = {'include_document_ids': True, 'include_only_joined_lists': False}
+        response = await _http_client.post(url, json=payload, headers=headers)
+        response.raise_for_status()
+        lists_data = response.json().get('lists', {})
+        list_doc_ids = set(lists_data.get(list_id, {}).get('document_ids', []))
+        entries = [
+            (doc_id, ts, shared)
+            for doc_id, ts, shared in entries
+            if doc_id in list_doc_ids
+        ]
+
+    # Batch-fetch full details in chunks, filtering as we go
     results = []
-    async for doc in document_generator():
-        # Apply optional title filter
-        if title_contains:
-            title = doc.title or ''
-            if case_sensitive:
-                if title_contains not in title:
-                    continue
+    batch_size = 40
+    for chunk_start in range(0, len(entries), batch_size):
+        chunk = entries[chunk_start : chunk_start + batch_size]
+        chunk_ids = [doc_id for doc_id, _, _ in chunk]
+        is_shared_map = {doc_id: is_shared for doc_id, _, is_shared in chunk}
+
+        docs = await _get_documents_by_ids(chunk_ids)
+
+        for doc in docs:
+            # Skip deleted documents
+            if doc.deleted_at:
+                continue
+
+            # Apply optional title filter
+            if title_contains:
+                title = doc.title or ''
+                if case_sensitive:
+                    if title_contains not in title:
+                        continue
+                else:
+                    if title_contains.lower() not in title.lower():
+                        continue
+
+            # Apply optional date filters
+            if created_at_gte or created_at_lte:
+                from datetime import datetime
+
+                created = datetime.fromisoformat(doc.created_at.replace('Z', '+00:00'))
+
+                if created_at_gte:
+                    filter_start = datetime.fromisoformat(
+                        created_at_gte + 'T00:00:00+00:00'
+                    )
+                    if created < filter_start:
+                        continue
+
+                if created_at_lte:
+                    filter_end = datetime.fromisoformat(
+                        created_at_lte + 'T23:59:59+00:00'
+                    )
+                    if created > filter_end:
+                        continue
+
+            if doc.people:
+                participant_count = len(doc.people.attendees)
             else:
-                if title_contains.lower() not in title.lower():
-                    continue
+                participant_count = 0
 
-        # Apply optional date filters
-        if created_at_gte or created_at_lte:
-            from datetime import datetime
+            # Extract participant details
+            if include_participants and doc.people:
+                participants = []
+                for attendee in doc.people.attendees:
+                    company_name = None
+                    if attendee.details and attendee.details.company.name:
+                        company_name = attendee.details.company.name
 
-            created = datetime.fromisoformat(doc.created_at.replace('Z', '+00:00'))
+                    job_title = None
+                    if attendee.details and attendee.details.person.jobTitle:
+                        job_title = attendee.details.person.jobTitle
 
-            if created_at_gte:
-                filter_start = datetime.fromisoformat(
-                    created_at_gte + 'T00:00:00+00:00'
+                    name = attendee.name
+                    if not name and attendee.details and attendee.details.person:
+                        name = attendee.details.person.name.fullName
+
+                    participants.append(
+                        {
+                            'name': name,
+                            'email': attendee.email,
+                            'company_name': company_name,
+                            'job_title': job_title,
+                        }
+                    )
+            else:
+                participants = None
+
+            results.append(
+                MeetingListItem(
+                    id=doc.id,
+                    title=doc.title or '(Untitled)',
+                    created_at=convert_utc_to_local(doc.created_at),
+                    type=doc.type,
+                    has_notes=bool(doc.notes or doc.notes_markdown),
+                    participant_count=participant_count,
+                    is_shared=is_shared_map.get(doc.id, False),
+                    participants=participants,
                 )
-                if created < filter_start:
-                    continue
-
-            if created_at_lte:
-                filter_end = datetime.fromisoformat(created_at_lte + 'T23:59:59+00:00')
-                if created > filter_end:
-                    continue
-
-        if doc.people:
-            participant_count = len(doc.people.attendees)
-        else:
-            participant_count = 0
-
-        # Extract participant details
-        if include_participants and doc.people:
-            participants = []
-            for attendee in doc.people.attendees:
-                # Extract company name from details if available
-                company_name = None
-                if attendee.details and attendee.details.company.name:
-                    company_name = attendee.details.company.name
-
-                # Extract job title from details if available
-                job_title = None
-                if attendee.details and attendee.details.person.jobTitle:
-                    job_title = attendee.details.person.jobTitle
-
-                # Extract name - try top-level first, then details.person.name.fullName
-                name = attendee.name
-                if not name and attendee.details and attendee.details.person:
-                    name = attendee.details.person.name.fullName
-
-                participants.append(
-                    {
-                        'name': name,
-                        'email': attendee.email,
-                        'company_name': company_name,
-                        'job_title': job_title,
-                    }
-                )
-        else:
-            participants = None
-
-        # Convert to MeetingListItem
-        results.append(
-            MeetingListItem(
-                id=doc.id,
-                title=doc.title or '(Untitled)',
-                created_at=convert_utc_to_local(doc.created_at),
-                type=doc.type,
-                has_notes=bool(doc.notes or doc.notes_markdown),
-                participant_count=participant_count,
-                participants=participants,
             )
-        )
 
-        # Check limit (0 = no limit)
+            if limit > 0 and len(results) >= limit:
+                break
+
         if limit > 0 and len(results) >= limit:
             break
 
@@ -346,18 +428,8 @@ async def download_note(
 
     headers = get_auth_headers()
 
-    # Get document metadata for title and date
-    doc_url = 'https://api.granola.ai/v2/get-documents'
-    doc_payload = {'id': document_id}
-    doc_response = await _http_client.post(doc_url, json=doc_payload, headers=headers)
-    doc_response.raise_for_status()
-    doc_data = DocumentsResponse.model_validate(doc_response.json())
-
-    # Should return exactly 1 document
-    if not doc_data.docs:
-        raise ValueError(f'Document {document_id} not found')
-
-    document = doc_data.docs[0]
+    # Get document metadata for title and date (works for owned + shared docs)
+    document = await _get_document_by_id(document_id)
 
     # Get panels from API
     panels_url = 'https://api.granola.ai/v1/get-document-panels'
@@ -461,18 +533,8 @@ async def download_transcript(
 
     headers = get_auth_headers()
 
-    # Get document metadata for title and date
-    doc_url = 'https://api.granola.ai/v2/get-documents'
-    doc_payload = {'id': document_id}
-    doc_response = await _http_client.post(doc_url, json=doc_payload, headers=headers)
-    doc_response.raise_for_status()
-    doc_data = DocumentsResponse.model_validate(doc_response.json())
-
-    # Should return exactly 1 document
-    if not doc_data.docs:
-        raise ValueError(f'Document {document_id} not found')
-
-    document = doc_data.docs[0]
+    # Get document metadata for title and date (works for owned + shared docs)
+    document = await _get_document_by_id(document_id)
 
     # Get the transcript
     url = 'https://api.granola.ai/v1/get-document-transcript'
@@ -580,7 +642,7 @@ async def download_private_notes(
     Download user's private notes to a temporary Markdown file.
 
     Returns private notes written by the user (not AI-generated notes).
-    Uses /v2/get-documents endpoint to fetch the notes_markdown field.
+    Uses get-documents-batch endpoint to fetch the notes_markdown field.
 
     Files are saved to a temp directory that is cleaned up when the MCP server shuts down.
 
@@ -595,20 +657,8 @@ async def download_private_notes(
     logger = DualLogger(ctx)
     await logger.info(f'Downloading private notes for document {document_id}')
 
-    headers = get_auth_headers()
-
-    # Get document data
-    doc_url = 'https://api.granola.ai/v2/get-documents'
-    doc_payload = {'id': document_id}
-    doc_response = await _http_client.post(doc_url, json=doc_payload, headers=headers)
-    doc_response.raise_for_status()
-    doc_data = DocumentsResponse.model_validate(doc_response.json())
-
-    # Should return exactly 1 document
-    if not doc_data.docs:
-        raise ValueError(f'Document {document_id} not found')
-
-    document = doc_data.docs[0]
+    # Get document data (works for owned + shared docs)
+    document = await _get_document_by_id(document_id)
 
     # Check if private notes exist
     if not document.notes_markdown:
@@ -715,35 +765,32 @@ async def get_meetings(document_ids: list[str], ctx: Context) -> list[MeetingLis
     logger = DualLogger(ctx)
     await logger.info(f'Fetching {len(document_ids)} meetings')
 
-    headers = get_auth_headers()
-    url = 'https://api.granola.ai/v1/get-documents-batch'
-    payload = {'document_ids': document_ids}
+    # Use the document set index to determine shared status
+    doc_set = await _get_document_set_cached()
 
-    response = await _http_client.post(url, json=payload, headers=headers)
-    response.raise_for_status()
-
-    data = BatchDocumentsResponse.model_validate(response.json())
+    docs = await _get_documents_by_ids(document_ids)
 
     # Convert to list items
     meetings = []
-    for doc in data.docs:
+    for doc in docs:
+        # Determine shared status from the index
+        entry = doc_set.documents.get(doc.id)
+        is_shared = bool(entry and entry.shared) if entry else False
+
         # Extract participant information
         participant_count = 0
         participants = []
         if doc.people:
             participant_count = len(doc.people.attendees)
             for attendee in doc.people.attendees:
-                # Extract company name from details if available
                 company_name = None
                 if attendee.details and attendee.details.company.name:
                     company_name = attendee.details.company.name
 
-                # Extract job title from details if available
                 job_title = None
                 if attendee.details and attendee.details.person.jobTitle:
                     job_title = attendee.details.person.jobTitle
 
-                # Extract name - try top-level first, then details.person.name.fullName
                 name = attendee.name
                 if not name and attendee.details and attendee.details.person:
                     name = attendee.details.person.name.fullName
@@ -765,6 +812,7 @@ async def get_meetings(document_ids: list[str], ctx: Context) -> list[MeetingLis
                 type=doc.type,
                 has_notes=bool(doc.notes or doc.notes_markdown),
                 participant_count=participant_count,
+                is_shared=is_shared,
                 participants=participants,
             )
         )
@@ -896,13 +944,8 @@ async def update_meeting(
         await logger.info(f'  Updating attendees ({len(attendees)} attendees)')
 
         # Fetch current document to get existing people object
-        get_url = 'https://api.granola.ai/v2/get-documents'
-        get_response = await _http_client.post(
-            get_url, json={'id': document_id}, headers=headers
-        )
-        get_response.raise_for_status()
-        doc = get_response.json()['docs'][0]
-        people = doc.get('people', {})
+        current_doc = await _get_document_by_id(document_id)
+        people = current_doc.people.model_dump() if current_doc.people else {}
 
         # Preserve existing fields: creator, title, created_at, sharing_link_visibility
         # Update: attendees, manual_attendee_edits
@@ -950,41 +993,44 @@ async def update_meeting(
 
 
 @mcp.tool(annotations=ToolAnnotations(title='List Deleted Meetings', readOnlyHint=True))
-async def list_deleted_meetings(ctx: Context) -> list[str]:
+async def list_deleted_meetings(ctx: Context) -> list[MeetingListItem]:
     """
-    List all deleted meeting document IDs.
+    List deleted meetings.
 
-    Returns the IDs of meetings that have been deleted. These IDs can be used
-    with undelete_meeting() to restore meetings.
-
-    Deleted meetings:
-    - Don't appear in normal search results
-    - Are tracked in the 'deleted' array of the API response
-    - Can be fully restored using their document ID
+    Fetches the document index and batch-fetches full details for documents
+    with a non-null deleted_at field. These can be restored with undelete_meeting().
 
     Args:
         ctx: MCP context
 
     Returns:
-        List of deleted document IDs
+        List of deleted meetings with metadata
     """
     logger = DualLogger(ctx)
-    await logger.info('Fetching deleted meeting IDs')
+    await logger.info('Fetching deleted meetings')
 
-    headers = get_auth_headers()
-    url = 'https://api.granola.ai/v2/get-documents'
+    # Get the full document index
+    doc_set = await _get_document_set_cached()
+    all_ids = list(doc_set.documents.keys())
 
-    # Fetch with high limit to get all deleted IDs
-    payload = {'limit': 100, 'offset': 0, 'include_last_viewed_panel': False}
+    # Fetch all documents and filter to deleted ones
+    docs = await _get_documents_by_ids(all_ids)
+    deleted = [doc for doc in docs if doc.deleted_at]
 
-    response = await _http_client.post(url, json=payload, headers=headers)
-    response.raise_for_status()
+    await logger.info(f'Found {len(deleted)} deleted meetings')
 
-    data = DocumentsResponse.model_validate(response.json())
-
-    await logger.info(f'Found {len(data.deleted)} deleted meetings')
-
-    return data.deleted
+    return [
+        MeetingListItem(
+            id=doc.id,
+            title=doc.title or '(Untitled)',
+            created_at=convert_utc_to_local(doc.created_at),
+            type=doc.type,
+            has_notes=bool(doc.notes or doc.notes_markdown),
+            participant_count=len(doc.people.attendees) if doc.people else 0,
+            is_shared=False,
+        )
+        for doc in deleted
+    ]
 
 
 # =============================================================================

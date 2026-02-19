@@ -557,6 +557,14 @@ class WorkspaceData(BaseModel):
     pre_call_email_blocklist: Sequence[str]
     pre_call_email_allowlist: Sequence[str]
     pre_call_email_large_meeting_threshold: int
+    workos_organization_id: str | None = None
+    sso_enabled: bool = False
+    mcp_enabled: bool = False
+    zoom_app_enabled: bool = False
+    zoom_consent_enabled: bool = False
+    zoom_consent_settings: Mapping[str, object] | None = None
+    google_meet_consent_enabled: bool = False
+    google_meet_consent_settings: Mapping[str, object] | None = None
 
 
 class WorkspaceItem(BaseModel):
@@ -628,6 +636,8 @@ class UpdateMeetingResult(BaseModel):
     """Result from /v1/update-document API."""
 
     id: str
+    ydoc_state: str | None = None  # Y.js document state
+    ydoc_resolution: str | None = None  # Y.js document resolution status
 
 
 # URL Resolution Models

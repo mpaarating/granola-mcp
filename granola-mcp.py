@@ -127,6 +127,23 @@ async def _get_document_set_cached() -> DocumentSetResponse:
 _document_cache: dict[str, object] = {}
 
 
+async def _invalidate_caches_for_document(
+    document_id: str,
+    *,
+    clear_document_set: bool = False,
+) -> None:
+    """Invalidate cached data for a document after a write operation.
+
+    Args:
+        document_id: The document ID to evict from the per-document cache.
+        clear_document_set: If True, also clear the document set index cache.
+            Use for operations that change document visibility (delete/undelete).
+    """
+    _document_cache.pop(document_id, None)
+    if clear_document_set:
+        await _get_document_set_cached.cache.clear()
+
+
 async def _get_documents_by_ids(document_ids: list[str]) -> list:
     """
     Fetch documents by IDs, using per-document cache.
@@ -859,6 +876,8 @@ async def delete_meeting(document_id: str, ctx: Context) -> DeleteMeetingResult:
     response = await _http_client.post(url, json=payload, headers=headers)
     response.raise_for_status()
 
+    await _invalidate_caches_for_document(document_id, clear_document_set=True)
+
     await logger.info(f'Successfully deleted meeting {document_id}')
 
     return DeleteMeetingResult(success=True, document_id=document_id)
@@ -895,6 +914,8 @@ async def undelete_meeting(document_id: str, ctx: Context) -> DeleteMeetingResul
 
     response = await _http_client.post(url, json=payload, headers=headers)
     response.raise_for_status()
+
+    await _invalidate_caches_for_document(document_id, clear_document_set=True)
 
     await logger.info(f'Successfully undeleted meeting {document_id}')
 
@@ -985,6 +1006,8 @@ async def update_meeting(
     # Send update request
     response = await _http_client.post(url, json=payload, headers=headers)
     response.raise_for_status()
+
+    await _invalidate_caches_for_document(document_id)
 
     result = UpdateMeetingResult.model_validate(response.json())
     await logger.info(f'Successfully updated meeting {result.id}')

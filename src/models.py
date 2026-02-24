@@ -366,6 +366,7 @@ class GranolaDocument(BaseModel):
     is_primary_event_note: bool | None = None  # Primary note for calendar event
     ydoc_state: str | None = None  # Y.js document state
     ydoc_version: int | None = None  # Y.js document version
+    zoom_rtms_permission: str | None = None  # Zoom RTMS permission for bot-free media streaming
 
 
 class DocumentSetEntry(BaseModel):

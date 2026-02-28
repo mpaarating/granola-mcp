@@ -380,6 +380,7 @@ class DocumentSetEntry(BaseModel):
     owner: bool | None = None
     shared: bool | None = None
     has_ydoc: bool | None = None
+    has_notes_ydoc: bool | None = None
 
 
 class DocumentSetResponse(BaseModel):

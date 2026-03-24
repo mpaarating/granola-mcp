@@ -1241,7 +1241,7 @@ async def resolve_url(url: str, ctx: Context) -> ResolveUrlResult:
         )
 
     # Check for /t/ (sharing token link)
-    t_match = re.search(r'/t/([a-f0-9-]+)', url)
+    t_match = re.search(r'/t/([a-zA-Z0-9-]+)', url)
     if t_match:
         token = t_match.group(1)
         await logger.info(f'Sharing link - resolving token: {token}')

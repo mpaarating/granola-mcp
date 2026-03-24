@@ -367,6 +367,7 @@ class GranolaDocument(BaseModel):
     ydoc_state: str | None = None  # Y.js document state
     ydoc_version: int | None = None  # Y.js document version
     zoom_rtms_permission: str | None = None  # Zoom RTMS permission for bot-free media streaming
+    document_user_role: str | None = None  # User's role for this document
 
 
 class DocumentSetEntry(BaseModel):
@@ -567,6 +568,13 @@ class WorkspaceData(BaseModel):
     zoom_consent_settings: Mapping[str, object] | None = None
     google_meet_consent_enabled: bool = False
     google_meet_consent_settings: Mapping[str, object] | None = None
+    zoom_rtms_enabled: bool = False
+    user_notes_api_enabled: bool = False
+    allow_external_invites: bool = True
+    allow_external_sharing: bool = True
+    allow_public_folders: bool = True
+    is_directory_provisioned_user: bool = False
+    directory_sync_enabled: bool = False
 
 
 class WorkspaceItem(BaseModel):

@@ -368,6 +368,7 @@ class GranolaDocument(BaseModel):
     ydoc_version: int | None = None  # Y.js document version
     zoom_rtms_permission: str | None = None  # Zoom RTMS permission for bot-free media streaming
     document_user_role: str | None = None  # User's role for this document
+    is_scratchpad: bool | None = None  # Whether document is a scratchpad
 
 
 class DocumentSetEntry(BaseModel):

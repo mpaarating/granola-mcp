@@ -329,6 +329,7 @@ class GranolaDocument(BaseModel):
     privacy_mode_enabled: bool
     workspace_id: str | None
     sharing_link_visibility: str
+    last_indexed_at: str | None = None
 
     # Nullable fields (can be None)
     people: People | None  # Can be None for some meetings

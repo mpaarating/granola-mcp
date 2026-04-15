@@ -446,6 +446,7 @@ class TranscriptSegment(BaseModel):
     text: str
     source: str  # "microphone" or "system"
     is_final: bool
+    transcriber_user_id: str | None = None
 
 
 class TranscriptDownloadResult(BaseModel):

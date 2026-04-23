@@ -220,6 +220,27 @@ class DocumentAttachment(BaseModel):
     height: int
 
 
+class DisplayLocationEntry(BaseModel):
+    """Single entry in Google Calendar event's displayLocations list.
+
+    Example observed: {"text": "+1 310 564 6610", "source": "location"}
+    """
+
+    text: str
+    source: str  # Observed: "location" — may have other values we haven't seen
+
+
+class DisplayLocations(BaseModel):
+    """Google Calendar's displayLocations field (added ~Apr 2026).
+
+    Structure observed from live API:
+      {"version": 1, "entries": [{"text": "...", "source": "location"}]}
+    """
+
+    version: int
+    entries: Sequence[DisplayLocationEntry]
+
+
 class GoogleCalendarEvent(BaseModel):
     id: str
     end: GoogleCalendarTime
@@ -255,6 +276,7 @@ class GoogleCalendarEvent(BaseModel):
     originalStartTime: GoogleCalendarTime | None = None
     guestsCanSeeOtherGuests: bool | None = None
     extendedProperties: Mapping[str, Mapping[str, str]] | None = None
+    displayLocations: DisplayLocations | None = None  # Added by Google Calendar API ~Apr 2026
 
 
 class ProseMirrorAttrs(BaseModel):

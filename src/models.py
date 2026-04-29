@@ -577,6 +577,7 @@ class WorkspaceData(BaseModel):
     affirmative_consent_enabled: bool
     in_meeting_copy_consent_message_banner_enabled: bool
     in_meeting_copy_consent_message_banner_message: str | None = None
+    virtual_webcam_notice_enabled: bool = False
     calendar_addon_api_key: str | None
     allow_transfer_notes: bool
     discoverable: bool
@@ -598,6 +599,7 @@ class WorkspaceData(BaseModel):
     user_notes_api_enabled: bool = False
     allow_external_invites: bool = True
     allow_external_sharing: bool = True
+    allow_external_users_to_share_with_workspace: bool = True
     allow_public_folders: bool = True
     is_directory_provisioned_user: bool = False
     directory_sync_enabled: bool = False

@@ -347,8 +347,8 @@ class GranolaDocument(BaseModel):
     meeting_end_count: int
     has_shareable_link: bool
     creation_source: str
-    subscription_plan_id: str
-    privacy_mode_enabled: bool
+    subscription_plan_id: str | None
+    privacy_mode_enabled: bool | None
     workspace_id: str | None
     sharing_link_visibility: str
     last_indexed_at: str | None = None

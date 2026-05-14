@@ -1,48 +1,197 @@
 """Helper functions for Granola MCP server."""
 
+import base64
+import hashlib
 import json
+import platform
+import plistlib
 import re
+import subprocess
+import time
 from datetime import datetime
 from pathlib import Path
 
+import httpx
 
-def get_auth_token() -> str:
-    """
-    Read WorkOS access token from Granola's local storage.
+# Mirror Granola Electron app identity headers; api.granola.ai rejects requests
+# without them as `{"message": "Unsupported client"}` (HTTP 200 envelope).
+# Header derivation adapted from granola-py-client (MIT — Anjor Kanekar,
+# github.com/anjor/granola-py-client).
+_DEFAULT_APP_VERSION = '7.220.0'
 
-    Raises:
-        FileNotFoundError: If Granola data directory doesn't exist
-        ValueError: If token data is malformed
-    """
-    granola_dir = Path.home() / 'Library' / 'Application Support' / 'Granola'
-    supabase_file = granola_dir / 'supabase.json'
+# Refresh the JWT this many seconds before its `exp` claim.
+_TOKEN_REFRESH_BUFFER_SECONDS = 60
 
+# In-process cache for the WorkOS access/refresh tokens. supabase.json is
+# read-only ground truth — we never write back. Granola desktop is no longer
+# observed to update supabase.json post-March-2026 DB encryption, so the MCP
+# must self-refresh.
+_TOKEN_CACHE: dict[str, str | int] = {}
+
+
+def _read_supabase_tokens() -> dict:
+    """Read the workos_tokens dict from Granola's supabase.json."""
+    supabase_file = Path.home() / 'Library' / 'Application Support' / 'Granola' / 'supabase.json'
     if not supabase_file.exists():
         raise FileNotFoundError(
             f'Granola auth file not found at {supabase_file}. '
             'Is Granola installed and authenticated?'
         )
-
-    with open(supabase_file) as f:
+    with supabase_file.open() as f:
         data = json.load(f)
-
     if 'workos_tokens' not in data:
         raise ValueError('No workos_tokens found in Granola auth file')
+    raw = data['workos_tokens']
+    return json.loads(raw) if isinstance(raw, str) else raw
 
-    tokens = json.loads(data['workos_tokens'])
 
-    if 'access_token' not in tokens:
-        raise ValueError('No access_token in workos_tokens')
+def _jwt_exp_seconds(access_token: str) -> int | None:
+    """Decode JWT `exp` claim (unix seconds). None if undecodable."""
+    parts = access_token.split('.')
+    if len(parts) < 2:
+        return None
+    try:
+        payload_b64 = parts[1] + '=' * (-len(parts[1]) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload_b64))
+    except (ValueError, json.JSONDecodeError):
+        return None
+    exp = claims.get('exp')
+    return int(exp) if isinstance(exp, (int, float)) else None
 
-    return tokens['access_token']
+
+def _refresh_workos_access_token(refresh_token: str) -> dict:
+    """POST /v1/refresh-access-token with identity headers (no Authorization)."""
+    headers = _identity_headers()
+    headers['Content-Type'] = 'application/json'
+    headers['Accept'] = 'application/json'
+    response = httpx.post(
+        'https://api.granola.ai/v1/refresh-access-token',
+        json={'refresh_token': refresh_token},
+        headers=headers,
+        timeout=30,
+    )
+    response.raise_for_status()
+    new_tokens = response.json()
+    if not isinstance(new_tokens, dict) or not new_tokens.get('access_token'):
+        raise ValueError(f'Refresh did not return an access_token: {new_tokens}')
+    return new_tokens
+
+
+def get_auth_token() -> str:
+    """
+    Return a fresh WorkOS access token, refreshing via /v1/refresh-access-token
+    if the cached or file-resident token is at/near expiry.
+
+    Raises:
+        FileNotFoundError: If Granola data directory doesn't exist
+        ValueError: If token data is malformed
+    """
+    cached_token = _TOKEN_CACHE.get('access_token')
+    cached_exp = _TOKEN_CACHE.get('exp')
+    now = int(time.time())
+
+    if isinstance(cached_token, str) and isinstance(cached_exp, int) and cached_exp - now > _TOKEN_REFRESH_BUFFER_SECONDS:
+        return cached_token
+
+    file_tokens = _read_supabase_tokens()
+    file_access = file_tokens.get('access_token')
+    refresh_token = _TOKEN_CACHE.get('refresh_token') or file_tokens.get('refresh_token')
+
+    if isinstance(file_access, str):
+        file_exp = _jwt_exp_seconds(file_access)
+        if file_exp is not None and file_exp - now > _TOKEN_REFRESH_BUFFER_SECONDS:
+            _TOKEN_CACHE['access_token'] = file_access
+            _TOKEN_CACHE['exp'] = file_exp
+            if isinstance(refresh_token, str):
+                _TOKEN_CACHE['refresh_token'] = refresh_token
+            return file_access
+
+    if not isinstance(refresh_token, str):
+        raise ValueError('No refresh_token available to refresh the expired access_token')
+
+    new_tokens = _refresh_workos_access_token(refresh_token)
+    new_access = new_tokens['access_token']
+    new_exp = _jwt_exp_seconds(new_access) or now + int(new_tokens.get('expires_in', 0) or 0)
+    _TOKEN_CACHE['access_token'] = new_access
+    _TOKEN_CACHE['exp'] = new_exp
+    _TOKEN_CACHE['refresh_token'] = new_tokens.get('refresh_token', refresh_token)
+    return new_access
+
+
+def _granola_app_version() -> str:
+    """Read CFBundleShortVersionString from the installed Granola.app, else fallback."""
+    plist = Path('/Applications/Granola.app/Contents/Info.plist')
+    if plist.exists():
+        try:
+            with plist.open('rb') as f:
+                v = plistlib.load(f).get('CFBundleShortVersionString')
+            if isinstance(v, str):
+                return v
+        except (OSError, plistlib.InvalidFileException):
+            pass
+    return _DEFAULT_APP_VERSION
+
+
+def _hashed_device_id() -> str | None:
+    """sha256(IOPlatformUUID) on macOS; None elsewhere or on lookup failure."""
+    if platform.system() != 'Darwin':
+        return None
+    try:
+        out = subprocess.run(
+            ['ioreg', '-d2', '-c', 'IOPlatformExpertDevice'],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5,
+        ).stdout
+    except (subprocess.SubprocessError, OSError):
+        return None
+    for line in out.splitlines():
+        if 'IOPlatformUUID' in line:
+            parts = line.split('"')
+            for i, p in enumerate(parts):
+                if p == 'IOPlatformUUID' and i + 2 < len(parts):
+                    return hashlib.sha256(parts[i + 2].encode('utf-8')).hexdigest()
+    return None
+
+
+def _os_version() -> str:
+    """macOS product version, e.g. '15.0'. Empty string if unobtainable."""
+    try:
+        return (
+            subprocess.run(
+                ['sw_vers', '-productVersion'],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=5,
+            ).stdout.strip()
+            or platform.mac_ver()[0]
+        )
+    except (subprocess.SubprocessError, OSError):
+        return platform.mac_ver()[0] or ''
+
+
+def _identity_headers() -> dict[str, str]:
+    """Granola-Electron identity headers, sans Authorization. Sent on every api.granola.ai call."""
+    headers = {
+        'X-Client-Version': _granola_app_version(),
+        'X-Granola-Platform': 'macOS',
+        'X-Granola-Os-Version': _os_version(),
+    }
+    device_id = _hashed_device_id()
+    if device_id:
+        headers['X-Granola-Device-Id'] = device_id
+    return headers
 
 
 def get_auth_headers() -> dict[str, str]:
-    """Get HTTP headers with authentication."""
-    token = get_auth_token()
+    """HTTP headers mimicking Granola's Electron app to bypass 'Unsupported client'."""
     return {
-        'Authorization': f'Bearer {token}',
+        'Authorization': f'Bearer {get_auth_token()}',
         'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        **_identity_headers(),
     }
 
 

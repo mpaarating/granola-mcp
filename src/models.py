@@ -6,7 +6,8 @@ Generated from actual API response analysis of 40 documents.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Literal
+
+from typing import Annotated, Literal, Union
 
 import pydantic
 
@@ -459,18 +460,71 @@ class DownloadResult(BaseModel):
     size_bytes: int
 
 
-class TranscriptSegment(BaseModel):
-    """Single segment of meeting transcript."""
+class _BaseTranscriptSegment(BaseModel):
+    """Fields shared by every transcript segment regardless of recording pipeline.
+
+    Subclasses below carve the type space by the `source` discriminator: each
+    Granola pipeline produces a different shape of segment, distinguished by
+    the source value the API emits. Do not instantiate this base directly;
+    validate through `TranscriptSegmentAdapter` so the discriminator routes
+    payloads to the correct subclass.
+    """
 
     document_id: str
     id: str
     start_timestamp: str  # ISO 8601
     end_timestamp: str  # ISO 8601
     text: str
-    source: str  # "microphone" or "system"
     is_final: bool
     transcriber_user_id: str | None = None
     detected_speaker_name: str | None = None
+
+
+class DesktopMicrophoneSegment(_BaseTranscriptSegment):
+    """Segment from Granola's macOS/Windows desktop pipeline, microphone channel.
+
+    This is the user's own voice (the "Me" half of Granola's 2-channel desktop
+    diarization).
+    """
+
+    source: Literal['microphone']
+
+
+class DesktopSystemSegment(_BaseTranscriptSegment):
+    """Segment from Granola's macOS/Windows desktop pipeline, system audio channel.
+
+    This is everyone else's voice picked up through the device speakers (the
+    "Them" half of Granola's 2-channel desktop diarization).
+    """
+
+    source: Literal['system']
+
+
+class AssemblyAISegment(_BaseTranscriptSegment):
+    """Segment from Granola's iPhone in-person pipeline, transcribed by AssemblyAI.
+
+    The speaker label (`Speaker A`, `Speaker B`, ...) is inlined as a prefix in
+    the `text` field by AssemblyAI's diarization. The `detected_speaker_name`
+    field (inherited from the base) is reserved for AssemblyAI's Speaker
+    Identification feature (real names from known_values), but is currently
+    always None — Granola has not started supplying known_values to AssemblyAI
+    as of May 2026.
+    """
+
+    source: Literal['assemblyai']
+
+
+TranscriptSegment = Annotated[
+    Union[DesktopMicrophoneSegment, DesktopSystemSegment, AssemblyAISegment],
+    pydantic.Field(discriminator='source'),
+]
+# `from __future__ import annotations` stringifies the union's element types
+# at definition time, so the TypeAdapter starts with unresolved forward refs.
+# Force resolution against this module's namespace.
+DesktopMicrophoneSegment.model_rebuild()
+DesktopSystemSegment.model_rebuild()
+AssemblyAISegment.model_rebuild()
+TranscriptSegmentAdapter = pydantic.TypeAdapter(TranscriptSegment)
 
 
 class TranscriptDownloadResult(BaseModel):
@@ -480,8 +534,16 @@ class TranscriptDownloadResult(BaseModel):
     size_bytes: int
     segment_count: int
     duration_seconds: int
-    microphone_segments: int
-    system_segments: int
+    # Counts per source value (e.g. {"assemblyai": 795} or
+    # {"microphone": 17, "system": 10}). Forward-extensible: a new Granola
+    # pipeline simply adds a new key, no schema change required here.
+    segment_counts: Mapping[str, int]
+
+
+# `from __future__ import annotations` defers annotation evaluation, so the
+# `Mapping[str, int]` type on segment_counts arrives as a string. Force
+# resolution here so consumers can validate without triggering a deferred build.
+TranscriptDownloadResult.model_rebuild()
 
 
 class DocumentPanel(BaseModel):

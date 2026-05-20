@@ -40,11 +40,14 @@ from src.helpers import (
 )
 from src.logging import DualLogger
 from src.models import (
+    AssemblyAISegment,
     AttendeeUpdate,
     BatchDocumentsResponse,
     CreateWorkspaceResult,
     DeleteMeetingResult,
     DeleteWorkspaceResult,
+    DesktopMicrophoneSegment,
+    DesktopSystemSegment,
     DocumentPanel,
     DocumentSetResponse,
     ListWorkspacesResult,
@@ -55,7 +58,7 @@ from src.models import (
     PrivateNoteDownloadResult,
     ResolveUrlResult,
     TranscriptDownloadResult,
-    TranscriptSegment,
+    TranscriptSegmentAdapter,
     UpdateMeetingResult,
     WorkspaceInfo,
     WorkspacesResponse,
@@ -560,20 +563,24 @@ async def download_transcript(
     response = await _http_client.post(url, json=payload, headers=headers)
     response.raise_for_status()
 
-    # Validate with strict Pydantic
-    segments = [TranscriptSegment.model_validate(seg) for seg in response.json()]
+    # Validate with strict Pydantic — the adapter dispatches each segment to
+    # the appropriate subclass (DesktopMicrophoneSegment / DesktopSystemSegment /
+    # AssemblyAISegment) based on the `source` discriminator.
+    segments = [TranscriptSegmentAdapter.validate_python(seg) for seg in response.json()]
 
     if not segments:
         raise ValueError(f'No transcript available for document {document_id}')
 
     # Calculate metadata
+    from collections import Counter
     from datetime import datetime
 
     total_segments = len(segments)
-    microphone_count = sum(1 for s in segments if s.source == 'microphone')
-    system_count = sum(1 for s in segments if s.source == 'system')
+    source_counts = dict(Counter(s.source for s in segments))
 
-    # Calculate duration
+    # Calculate duration. AssemblyAI segments often have identical
+    # start/end timestamps (no per-segment duration), so this can be 0
+    # for assemblyai-source meetings — accurate, not a bug to mask.
     start = datetime.fromisoformat(segments[0].start_timestamp.replace('Z', '+00:00'))
     end = datetime.fromisoformat(segments[-1].end_timestamp.replace('Z', '+00:00'))
     duration = end - start
@@ -595,26 +602,50 @@ async def download_transcript(
     lines.append('Transcript:')
     lines.append(' ')
 
-    # Build transcript content (no timestamps, simple labels)
-    # Combine consecutive segments from the same speaker
+    # Build transcript content (no timestamps, simple labels). Dispatch on
+    # the concrete segment subclass — pydantic has already validated each
+    # segment into the correct shape via the discriminated union.
+    _SPEAKER_TEXT_PREFIX = re.compile(r'^Speaker [A-Z]: ')
     combined_segments = []
     current_label = None
     current_texts = []
 
     for segment in segments:
-        # Map source to Granola's labels
-        label = 'Me' if segment.source == 'microphone' else 'Them'
+        match segment:
+            case DesktopMicrophoneSegment():
+                label = 'Me'
+                text = segment.text
+            case DesktopSystemSegment():
+                label = 'Them'
+                text = segment.text
+            case AssemblyAISegment():
+                # AssemblyAI's diarization inlines "Speaker A: " into the
+                # segment text. Prefer detected_speaker_name (Granola's
+                # identified-name slot) when populated; otherwise parse the
+                # prefix out of text and use it as the label.
+                m = _SPEAKER_TEXT_PREFIX.match(segment.text)
+                if segment.detected_speaker_name:
+                    label = segment.detected_speaker_name
+                    text = segment.text[m.end():] if m else segment.text
+                elif m:
+                    label = m.group(0).rstrip(': ').strip()  # e.g. 'Speaker A'
+                    text = segment.text[m.end():]
+                else:
+                    # Anomaly: assemblyai segment without a speaker prefix.
+                    # Preserve as-is rather than guess.
+                    label = '(unknown)'
+                    text = segment.text
 
         if label == current_label:
             # Same speaker - accumulate text
-            current_texts.append(segment.text)
+            current_texts.append(text)
         else:
             # Different speaker - save previous and start new
             if current_label is not None:
                 combined_text = ' '.join(current_texts)
                 combined_segments.append(f'{current_label}: {combined_text}')
             current_label = label
-            current_texts = [segment.text]
+            current_texts = [text]
 
     # Don't forget the last segment
     if current_label is not None:
@@ -642,8 +673,7 @@ async def download_transcript(
         size_bytes=len(transcript_md.encode('utf-8')),
         segment_count=total_segments,
         duration_seconds=int(duration.total_seconds()),
-        microphone_segments=microphone_count,
-        system_segments=system_count,
+        segment_counts=source_counts,
     )
 
 

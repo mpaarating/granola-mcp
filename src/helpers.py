@@ -12,6 +12,8 @@ from datetime import datetime
 from pathlib import Path
 
 import httpx
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 # Mirror Granola Electron app identity headers; api.granola.ai rejects requests
 # without them as `{"message": "Unsupported client"}` (HTTP 200 envelope).
@@ -22,20 +24,87 @@ _DEFAULT_APP_VERSION = '7.220.0'
 # Refresh the JWT this many seconds before its `exp` claim.
 _TOKEN_REFRESH_BUFFER_SECONDS = 60
 
-# In-process cache for the WorkOS access/refresh tokens. supabase.json is
-# read-only ground truth — we never write back. Granola desktop is no longer
-# observed to update supabase.json post-March-2026 DB encryption, so the MCP
-# must self-refresh.
+# In-process cache for the WorkOS access/refresh tokens (read-only — never
+# written back). Post-~May-2026, Granola desktop stopped updating the plaintext
+# supabase.json and moved auth into an encrypted store (supabase.json.enc, keyed
+# by storage.dek). We read that live store first (see _read_encrypted_tokens),
+# fall back to the legacy plaintext file, then self-refresh if near expiry.
 _TOKEN_CACHE: dict[str, str | int] = {}
+
+_GRANOLA_DIR = Path.home() / 'Library' / 'Application Support' / 'Granola'
+
+
+def _keychain_safestorage_password() -> str | None:
+    """macOS only: Granola's Electron safeStorage key from the login Keychain."""
+    if platform.system() != 'Darwin':
+        return None
+    result = subprocess.run(
+        ['security', 'find-generic-password', '-w', '-s', 'Granola Safe Storage'],
+        capture_output=True,
+        text=True,
+    )
+    pw = result.stdout.strip()
+    return pw if result.returncode == 0 and pw else None
+
+
+def _safestorage_decrypt_v10(blob: bytes, password: str) -> bytes:
+    """Decrypt a Chromium/Electron OSCrypt 'v10' blob (macOS variant): AES-128-CBC,
+    key = PBKDF2-HMAC-SHA1(password, 'saltysalt', 1003 iters, 16 bytes),
+    IV = 16 spaces, PKCS7 padding."""
+    if blob[:3] != b'v10':
+        raise ValueError('not a v10 safeStorage blob')
+    key = hashlib.pbkdf2_hmac('sha1', password.encode('utf-8'), b'saltysalt', 1003, dklen=16)
+    decryptor = Cipher(algorithms.AES(key), modes.CBC(b' ' * 16)).decryptor()
+    plaintext = decryptor.update(blob[3:]) + decryptor.finalize()
+    pad = plaintext[-1] if plaintext else 0
+    return plaintext[:-pad] if 1 <= pad <= 16 else plaintext
+
+
+def _read_encrypted_tokens() -> dict | None:
+    """Read live workos_tokens from Granola's post-2026 encrypted store.
+
+    Chain (macOS):
+        Keychain 'Granola Safe Storage' password
+          -> AES-128-CBC (safeStorage v10) decrypt storage.dek
+          -> base64-decode -> 32-byte data-encryption key (DEK)
+        DEK -> AES-256-GCM (nonce = first 12 bytes) decrypt supabase.json.enc
+    Returns the workos_tokens dict, or None if the store/key is unavailable
+    (caller then falls back to the legacy plaintext file).
+    """
+    enc_path = _GRANOLA_DIR / 'supabase.json.enc'
+    dek_path = _GRANOLA_DIR / 'storage.dek'
+    if not (enc_path.exists() and dek_path.exists()):
+        return None
+    password = _keychain_safestorage_password()
+    if not password:
+        return None
+    try:
+        dek = base64.b64decode(_safestorage_decrypt_v10(dek_path.read_bytes(), password))
+        blob = enc_path.read_bytes()
+        plaintext = AESGCM(dek).decrypt(blob[:12], blob[12:], None)
+        data = json.loads(plaintext)
+    except Exception:
+        return None
+    raw = data.get('workos_tokens') if isinstance(data, dict) else None
+    if raw is None:
+        return None
+    return json.loads(raw) if isinstance(raw, str) else raw
 
 
 def _read_supabase_tokens() -> dict:
-    """Read the workos_tokens dict from Granola's supabase.json."""
-    supabase_file = Path.home() / 'Library' / 'Application Support' / 'Granola' / 'supabase.json'
+    """Return the workos_tokens dict from Granola's local auth store.
+
+    Prefers the live encrypted store (current desktop builds); falls back to the
+    legacy plaintext supabase.json for older installs.
+    """
+    live = _read_encrypted_tokens()
+    if live and live.get('access_token'):
+        return live
+    supabase_file = _GRANOLA_DIR / 'supabase.json'
     if not supabase_file.exists():
         raise FileNotFoundError(
-            f'Granola auth file not found at {supabase_file}. '
-            'Is Granola installed and authenticated?'
+            f'Granola auth file not found at {supabase_file} and the encrypted '
+            'store was unreadable. Is Granola installed and authenticated?'
         )
     with supabase_file.open() as f:
         data = json.load(f)

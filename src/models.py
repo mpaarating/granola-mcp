@@ -328,6 +328,7 @@ class LastViewedPanel(BaseModel):
     generated_lines: Sequence[GeneratedLine] | None = None
     ydoc_state: str | None = None  # Y.js document state
     ydoc_version: int | None = None  # Y.js document version
+    has_speaker_attribution: bool | None = None  # New field - whether the panel has speaker attribution
 
 
 # Main document model

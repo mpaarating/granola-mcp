@@ -566,6 +566,7 @@ class DocumentPanel(BaseModel):
     generated_lines: Sequence[GeneratedLine] | None = None
     user_feedback: None = None
     ydoc_version: int | None = None  # Y.js document version
+    has_speaker_attribution: bool | None = None  # New field - whether the panel has speaker attribution
 
 
 class NoteDownloadResult(BaseModel):

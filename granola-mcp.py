@@ -489,8 +489,8 @@ async def download_note(
             default_title=True,  # Use [URL](URL) format for links
         ).strip()
     else:
-        # Content is ProseMirror JSON dict - use existing converter
-        notes_markdown = prosemirror_to_markdown(summary_panel.content)
+        # Content is a validated ProseMirrorDoc - converter operates on plain dicts
+        notes_markdown = prosemirror_to_markdown(summary_panel.content.model_dump())
 
     # Format date from created_at
     from datetime import datetime

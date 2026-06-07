@@ -348,7 +348,11 @@ def prosemirror_to_markdown(content: dict, depth: int = 0) -> str:
         depth: Current nesting depth for lists (used for indentation)
     """
     if not isinstance(content, dict):
-        return ''
+        # Fail fast: a silent '' here turned validated-model input into empty
+        # notes (pass model_dump() output for Pydantic ProseMirror models).
+        raise TypeError(
+            f'prosemirror_to_markdown expects a dict node, got {type(content).__name__}'
+        )
 
     node_type = content.get('type', '')
 

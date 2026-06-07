@@ -33,14 +33,14 @@ import markdownify
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
 
-from src.helpers import (
+from granola_mcp.helpers import (
     analyze_markdown_metadata,
     convert_utc_to_local,
     get_auth_headers,
     prosemirror_to_markdown,
 )
-from src.logging import DualLogger
-from src.models import (
+from granola_mcp.logging import DualLogger
+from granola_mcp.models import (
     AssemblyAISegment,
     AttendeeUpdate,
     BatchDocumentsResponse,

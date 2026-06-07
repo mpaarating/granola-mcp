@@ -132,8 +132,8 @@ claude mcp add --scope user --transport stdio granola -- uv run --script ~/grano
 - Strict Pydantic validation (fail fast on API changes)
 - Temp directory for downloads (auto-cleanup on shutdown)
 - Follows browser-automation-mcp.py patterns
-- Helper functions organized in `src/helpers.py`
-- Pydantic models in `src/models.py`
+- Helper functions organized in `granola_mcp/helpers.py`
+- Pydantic models in `granola_mcp/models.py`
 
 ## Development
 

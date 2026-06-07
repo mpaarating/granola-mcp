@@ -21,17 +21,17 @@ This is an MCP (Model Context Protocol) server that provides access to Granola m
 - Global state: `_http_client`, `_temp_dir`, `_export_dir`
 - Session-based caching with `aiocache` for API responses (cleared on server restart)
 
-**Data models** (`src/models.py`):
+**Data models** (`granola_mcp/models.py`):
 - Strict Pydantic models with `extra='forbid'` and `strict=True` - fail fast on API changes
 - Hierarchy: `DocumentsResponse` → `GranolaDocument` → nested models for People, GoogleCalendarEvent, etc.
 - Simplified response models: `MeetingListItem`, `NoteDownloadResult`, `TranscriptDownloadResult`
 
-**Helper utilities** (`src/helpers.py`):
+**Helper utilities** (`granola_mcp/helpers.py`):
 - `get_auth_token()`: Reads WorkOS OAuth token from `~/Library/Application Support/Granola/supabase.json`
 - `prosemirror_to_markdown()`: Recursive converter for ProseMirror JSON → Markdown (handles nested lists, headings, links, formatting)
 - `analyze_markdown_metadata()`: Extracts structural metrics (sections, bullets, word count)
 
-**Logging utilities** (`src/logging.py`):
+**Logging utilities** (`granola_mcp/logging.py`):
 - `DualLogger`: Logs to both stdout and MCP client context for debugging
 
 ### API Endpoints Used
@@ -166,9 +166,9 @@ Deletion is soft delete via timestamp:
 
 Validation errors from `extra='forbid'` are expected when the API evolves. The error gives you a starting point (field name, value, type), but don't just pattern-match to a fix.
 
-**Before changing models, re-read `src/models.py`** to understand existing patterns. Don't rely on memory.
+**Before changing models, re-read `granola_mcp/models.py`** to understand existing patterns. Don't rely on memory.
 
-**Inspect the API** to understand the field: Is it always present? Can it be null? What does it represent? Use `src/helpers.py` for auth (`get_auth_token()`, `get_auth_headers()`) - the token lives in `~/Library/Application Support/Granola/supabase.json` nested as `workos_tokens` → `access_token`.
+**Inspect the API** to understand the field: Is it always present? Can it be null? What does it represent? Use `granola_mcp/helpers.py` for auth (`get_auth_token()`, `get_auth_headers()`) - the token lives in `~/Library/Application Support/Granola/supabase.json` nested as `workos_tokens` → `access_token`.
 
 **Reason about the type**: Consider nullability, semantic meaning, whether to model nested structures. For sequences, prefer `Sequence[T]` (immutable interface) over `list[T]`. The goal is understanding, not just silencing the error.
 
@@ -176,6 +176,6 @@ Validation errors from `extra='forbid'` are expected when the API evolves. The e
 
 **Adding a new tool**: Follow the pattern in existing tools - add `@mcp.tool` decorator, use `DualLogger` for logging, validate responses with Pydantic models, return structured result models.
 
-**Updating models**: When API changes, update Pydantic models in `src/models.py`. Strict validation will immediately catch mismatches. See "Fixing Validation Errors" above.
+**Updating models**: When API changes, update Pydantic models in `granola_mcp/models.py`. Strict validation will immediately catch mismatches. See "Fixing Validation Errors" above.
 
 **Adding API endpoint**: Add to helpers or main file, use `_http_client` for requests, add `get_auth_headers()` for authentication, validate response with new Pydantic model.

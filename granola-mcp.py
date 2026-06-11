@@ -3,7 +3,6 @@
 # requires-python = ">=3.11,<3.13"
 # dependencies = [
 #   "aiocache",
-#   "cryptography",
 #   "fastmcp>=2.12.5",
 #   "httpx",
 #   "markdownify",

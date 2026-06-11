@@ -1,19 +1,12 @@
 """Helper functions for Granola MCP server."""
 
-import base64
 import hashlib
-import json
 import platform
 import plistlib
 import re
 import subprocess
-import time
 from datetime import datetime
 from pathlib import Path
-
-import httpx
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 # Mirror Granola Electron app identity headers; api.granola.ai rejects requests
 # without them as `{"message": "Unsupported client"}` (HTTP 200 envelope).
@@ -21,170 +14,22 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 # github.com/anjor/granola-py-client).
 _DEFAULT_APP_VERSION = '7.220.0'
 
-# Refresh the JWT this many seconds before its `exp` claim.
-_TOKEN_REFRESH_BUFFER_SECONDS = 60
-
-# In-process cache for the WorkOS access/refresh tokens (read-only — never
-# written back). Post-~May-2026, Granola desktop stopped updating the plaintext
-# supabase.json and moved auth into an encrypted store (supabase.json.enc, keyed
-# by storage.dek). We read that live store first (see _read_encrypted_tokens),
-# fall back to the legacy plaintext file, then self-refresh if near expiry.
-_TOKEN_CACHE: dict[str, str | int] = {}
-
-_GRANOLA_DIR = Path.home() / 'Library' / 'Application Support' / 'Granola'
-
-
-def _keychain_safestorage_password() -> str | None:
-    """macOS only: Granola's Electron safeStorage key from the login Keychain."""
-    if platform.system() != 'Darwin':
-        return None
-    result = subprocess.run(
-        ['security', 'find-generic-password', '-w', '-s', 'Granola Safe Storage'],
-        capture_output=True,
-        text=True,
-    )
-    pw = result.stdout.strip()
-    return pw if result.returncode == 0 and pw else None
-
-
-def _safestorage_decrypt_v10(blob: bytes, password: str) -> bytes:
-    """Decrypt a Chromium/Electron OSCrypt 'v10' blob (macOS variant): AES-128-CBC,
-    key = PBKDF2-HMAC-SHA1(password, 'saltysalt', 1003 iters, 16 bytes),
-    IV = 16 spaces, PKCS7 padding."""
-    if blob[:3] != b'v10':
-        raise ValueError('not a v10 safeStorage blob')
-    key = hashlib.pbkdf2_hmac('sha1', password.encode('utf-8'), b'saltysalt', 1003, dklen=16)
-    decryptor = Cipher(algorithms.AES(key), modes.CBC(b' ' * 16)).decryptor()
-    plaintext = decryptor.update(blob[3:]) + decryptor.finalize()
-    pad = plaintext[-1] if plaintext else 0
-    return plaintext[:-pad] if 1 <= pad <= 16 else plaintext
-
-
-def _read_encrypted_tokens() -> dict | None:
-    """Read live workos_tokens from Granola's post-2026 encrypted store.
-
-    Chain (macOS):
-        Keychain 'Granola Safe Storage' password
-          -> AES-128-CBC (safeStorage v10) decrypt storage.dek
-          -> base64-decode -> 32-byte data-encryption key (DEK)
-        DEK -> AES-256-GCM (nonce = first 12 bytes) decrypt supabase.json.enc
-    Returns the workos_tokens dict, or None if the store/key is unavailable
-    (caller then falls back to the legacy plaintext file).
-    """
-    enc_path = _GRANOLA_DIR / 'supabase.json.enc'
-    dek_path = _GRANOLA_DIR / 'storage.dek'
-    if not (enc_path.exists() and dek_path.exists()):
-        return None
-    password = _keychain_safestorage_password()
-    if not password:
-        return None
-    try:
-        dek = base64.b64decode(_safestorage_decrypt_v10(dek_path.read_bytes(), password))
-        blob = enc_path.read_bytes()
-        plaintext = AESGCM(dek).decrypt(blob[:12], blob[12:], None)
-        data = json.loads(plaintext)
-    except Exception:
-        return None
-    raw = data.get('workos_tokens') if isinstance(data, dict) else None
-    if raw is None:
-        return None
-    return json.loads(raw) if isinstance(raw, str) else raw
-
-
-def _read_supabase_tokens() -> dict:
-    """Return the workos_tokens dict from Granola's local auth store.
-
-    Prefers the live encrypted store (current desktop builds); falls back to the
-    legacy plaintext supabase.json for older installs.
-    """
-    live = _read_encrypted_tokens()
-    if live and live.get('access_token'):
-        return live
-    supabase_file = _GRANOLA_DIR / 'supabase.json'
-    if not supabase_file.exists():
-        raise FileNotFoundError(
-            f'Granola auth file not found at {supabase_file} and the encrypted '
-            'store was unreadable. Is Granola installed and authenticated?'
-        )
-    with supabase_file.open() as f:
-        data = json.load(f)
-    if 'workos_tokens' not in data:
-        raise ValueError('No workos_tokens found in Granola auth file')
-    raw = data['workos_tokens']
-    return json.loads(raw) if isinstance(raw, str) else raw
-
-
-def _jwt_exp_seconds(access_token: str) -> int | None:
-    """Decode JWT `exp` claim (unix seconds). None if undecodable."""
-    parts = access_token.split('.')
-    if len(parts) < 2:
-        return None
-    try:
-        payload_b64 = parts[1] + '=' * (-len(parts[1]) % 4)
-        claims = json.loads(base64.urlsafe_b64decode(payload_b64))
-    except (ValueError, json.JSONDecodeError):
-        return None
-    exp = claims.get('exp')
-    return int(exp) if isinstance(exp, (int, float)) else None
-
-
-def _refresh_workos_access_token(refresh_token: str) -> dict:
-    """POST /v1/refresh-access-token with identity headers (no Authorization)."""
-    headers = _identity_headers()
-    headers['Content-Type'] = 'application/json'
-    headers['Accept'] = 'application/json'
-    response = httpx.post(
-        'https://api.granola.ai/v1/refresh-access-token',
-        json={'refresh_token': refresh_token},
-        headers=headers,
-        timeout=30,
-    )
-    response.raise_for_status()
-    new_tokens = response.json()
-    if not isinstance(new_tokens, dict) or not new_tokens.get('access_token'):
-        raise ValueError(f'Refresh did not return an access_token: {new_tokens}')
-    return new_tokens
-
 
 def get_auth_token() -> str:
-    """
-    Return a fresh WorkOS access token, refreshing via /v1/refresh-access-token
-    if the cached or file-resident token is at/near expiry.
+    """Return a valid Granola access token.
+
+    Delegates to the self-refreshing auth manager (``granola_mcp/auth.py``), which
+    holds our own refresh token in ``~/.granola-mcp/auth.json`` and mints access
+    tokens on demand. This deliberately avoids reading Granola's local token store
+    (now an encrypted ``supabase.json.enc`` keyed via the macOS Keychain) — that
+    store's format is fragile and re-breaks on Granola updates. See ``auth.py``.
 
     Raises:
-        FileNotFoundError: If Granola data directory doesn't exist
-        ValueError: If token data is malformed
+        GranolaAuthError: If no usable token is available (run ``python3 login.py``).
     """
-    cached_token = _TOKEN_CACHE.get('access_token')
-    cached_exp = _TOKEN_CACHE.get('exp')
-    now = int(time.time())
+    from granola_mcp.auth import get_access_token
 
-    if isinstance(cached_token, str) and isinstance(cached_exp, int) and cached_exp - now > _TOKEN_REFRESH_BUFFER_SECONDS:
-        return cached_token
-
-    file_tokens = _read_supabase_tokens()
-    file_access = file_tokens.get('access_token')
-    refresh_token = _TOKEN_CACHE.get('refresh_token') or file_tokens.get('refresh_token')
-
-    if isinstance(file_access, str):
-        file_exp = _jwt_exp_seconds(file_access)
-        if file_exp is not None and file_exp - now > _TOKEN_REFRESH_BUFFER_SECONDS:
-            _TOKEN_CACHE['access_token'] = file_access
-            _TOKEN_CACHE['exp'] = file_exp
-            if isinstance(refresh_token, str):
-                _TOKEN_CACHE['refresh_token'] = refresh_token
-            return file_access
-
-    if not isinstance(refresh_token, str):
-        raise ValueError('No refresh_token available to refresh the expired access_token')
-
-    new_tokens = _refresh_workos_access_token(refresh_token)
-    new_access = new_tokens['access_token']
-    new_exp = _jwt_exp_seconds(new_access) or now + int(new_tokens.get('expires_in', 0) or 0)
-    _TOKEN_CACHE['access_token'] = new_access
-    _TOKEN_CACHE['exp'] = new_exp
-    _TOKEN_CACHE['refresh_token'] = new_tokens.get('refresh_token', refresh_token)
-    return new_access
+    return get_access_token()
 
 
 def _granola_app_version() -> str:

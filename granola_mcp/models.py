@@ -13,9 +13,13 @@ import pydantic
 
 
 class BaseModel(pydantic.BaseModel):
-    """Base model with strict validation - no extra fields, all fields required unless Optional."""
+    """Base model with strict validation.
 
-    model_config = pydantic.ConfigDict(extra='forbid', strict=True)
+    extra='ignore' (not 'forbid') so new fields Granola adds to its API don't break
+    parsing — the schema drifts often and we only consume a known subset.
+    """
+
+    model_config = pydantic.ConfigDict(extra='ignore', strict=True)
 
 
 # Nested models for structured data

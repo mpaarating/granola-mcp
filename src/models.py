@@ -171,6 +171,8 @@ class ConferenceEntryPoint(BaseModel):
     label: str | None = None
     pin: str | None = None
     regionCode: str | None = None
+    passcode: str | None = None
+    meetingCode: str | None = None
 
 
 class ConferenceSolutionKey(BaseModel):
@@ -208,6 +210,8 @@ class ConferenceData(BaseModel):
     conferenceSolution: ConferenceSolution
     conferenceId: str | None = None
     createRequest: ConferenceCreateRequest | None = None
+    notes: str | None = None
+    parameters: Mapping[str, Mapping[str, str | Mapping[str, str]]] | None = None
 
 
 class DocumentAttachment(BaseModel):
@@ -242,6 +246,7 @@ class GoogleCalendarEvent(BaseModel):
     # Optional fields
     primaryCalendar: bool | None = None
     location: str | None = None
+    displayLocations: Sequence[str] | None = None
     description: str | None = None
     guestsCanInviteOthers: bool | None = None
     attendees: Sequence[CalendarAttendee] | None = None
@@ -348,7 +353,7 @@ class GranolaDocument(BaseModel):
     affinity_note_id: None = None  # Always null
     show_private_notes: bool | None
     attachments: Sequence[DocumentAttachment] | None
-    hubspot_note_url: None = None  # Always null
+    hubspot_note_url: str | None = None
     status: str | None = None
     external_transcription_id: str | None = None
     audio_file_handle: str | None = None
@@ -366,6 +371,11 @@ class GranolaDocument(BaseModel):
     is_primary_event_note: bool | None = None  # Primary note for calendar event
     ydoc_state: str | None = None  # Y.js document state
     ydoc_version: int | None = None  # Y.js document version
+    zoom_rtms_permission: bool | None = None  # Zoom RTMS permission flag
+    document_user_role: str | None = None  # User's role for this document
+    is_scratchpad: bool | None = None  # Whether document is a scratchpad
+    last_indexed_at: str | None = None  # Timestamp of last search index update
+    is_shared_direct: bool | None = None  # Whether document is directly shared (not inherited)
 
 
 class DocumentSetEntry(BaseModel):
@@ -379,6 +389,8 @@ class DocumentSetEntry(BaseModel):
     owner: bool | None = None
     shared: bool | None = None
     has_ydoc: bool | None = None
+    has_notes_ydoc: bool | None = None
+    last_indexed_at: str | None = None
 
 
 class DocumentSetResponse(BaseModel):
@@ -441,6 +453,7 @@ class TranscriptSegment(BaseModel):
     text: str
     source: str  # "microphone" or "system"
     is_final: bool
+    transcriber_user_id: str | None = None
 
 
 class TranscriptDownloadResult(BaseModel):

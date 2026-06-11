@@ -8,41 +8,33 @@ from pathlib import Path
 
 def get_auth_token() -> str:
     """
-    Read WorkOS access token from Granola's local storage.
+    Return a valid Granola access token.
+
+    Delegates to the self-refreshing auth manager (src/auth.py), which holds our own
+    refresh token in ~/.granola-mcp/auth.json and mints access tokens on demand. This
+    replaces the old approach of reading the token straight off Granola's local store,
+    which broke when Granola moved to an encrypted token file. See src/auth.py.
 
     Raises:
-        FileNotFoundError: If Granola data directory doesn't exist
-        ValueError: If token data is malformed
+        GranolaAuthError: If no usable token is available (run ``python3 login.py``).
     """
-    granola_dir = Path.home() / 'Library' / 'Application Support' / 'Granola'
-    supabase_file = granola_dir / 'supabase.json'
+    from src.auth import get_access_token
 
-    if not supabase_file.exists():
-        raise FileNotFoundError(
-            f'Granola auth file not found at {supabase_file}. '
-            'Is Granola installed and authenticated?'
-        )
-
-    with open(supabase_file) as f:
-        data = json.load(f)
-
-    if 'workos_tokens' not in data:
-        raise ValueError('No workos_tokens found in Granola auth file')
-
-    tokens = json.loads(data['workos_tokens'])
-
-    if 'access_token' not in tokens:
-        raise ValueError('No access_token in workos_tokens')
-
-    return tokens['access_token']
+    return get_access_token()
 
 
 def get_auth_headers() -> dict[str, str]:
-    """Get HTTP headers with authentication."""
+    """Get HTTP headers with authentication.
+
+    X-Client-Version and X-Granola-Platform are required by Granola's API — without
+    them the backend rejects requests as an unsupported client.
+    """
     token = get_auth_token()
     return {
         'Authorization': f'Bearer {token}',
         'Content-Type': 'application/json',
+        'X-Client-Version': '7.220.0',
+        'X-Granola-Platform': 'macOS',
     }
 
 

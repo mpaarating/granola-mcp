@@ -12,9 +12,13 @@ import pydantic
 
 
 class BaseModel(pydantic.BaseModel):
-    """Base model with strict validation - no extra fields, all fields required unless Optional."""
+    """Base model with strict validation.
 
-    model_config = pydantic.ConfigDict(extra='forbid', strict=True)
+    extra='ignore' (not 'forbid') so new fields Granola adds to its API don't break
+    parsing — the schema drifts often and we only consume a known subset.
+    """
+
+    model_config = pydantic.ConfigDict(extra='ignore', strict=True)
 
 
 # Nested models for structured data
@@ -330,8 +334,8 @@ class GranolaDocument(BaseModel):
     meeting_end_count: int
     has_shareable_link: bool
     creation_source: str
-    subscription_plan_id: str
-    privacy_mode_enabled: bool
+    subscription_plan_id: str | None = None
+    privacy_mode_enabled: bool | None = None
     workspace_id: str | None
     sharing_link_visibility: str
 
@@ -549,7 +553,7 @@ class WorkspaceData(BaseModel):
     is_locked: bool
     created_at: str
     updated_at: str
-    privacy_mode_enabled: bool
+    privacy_mode_enabled: bool | None = None
     sharing_link_visibility: str | None
     transcript_retention_hours: int | None
     transcript_retention_hours_updated_at: str | None
@@ -597,7 +601,7 @@ class WorkspaceInfo(BaseModel):
     created_at: str
     role: str
     plan_type: str
-    privacy_mode_enabled: bool
+    privacy_mode_enabled: bool | None = None
 
 
 class ListWorkspacesResult(BaseModel):

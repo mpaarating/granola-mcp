@@ -22,12 +22,13 @@ This is an MCP (Model Context Protocol) server that provides access to Granola m
 - Session-based caching with `aiocache` for API responses (cleared on server restart)
 
 **Data models** (`granola_mcp/models.py`):
-- Strict Pydantic models with `extra='forbid'` and `strict=True` - fail fast on API changes
+- Pydantic models with `extra='ignore'` and `strict=True` - ignore unknown fields (Granola adds them often) while still type-checking the fields we consume
 - Hierarchy: `DocumentsResponse` → `GranolaDocument` → nested models for People, GoogleCalendarEvent, etc.
 - Simplified response models: `MeetingListItem`, `NoteDownloadResult`, `TranscriptDownloadResult`
 
 **Helper utilities** (`granola_mcp/helpers.py`):
-- `get_auth_token()`: Reads WorkOS OAuth token from `~/Library/Application Support/Granola/supabase.json`
+- `get_auth_token()`: Delegates to the self-refreshing auth manager in `granola_mcp/auth.py` (mints a WorkOS access token from our own refresh token in `~/.granola-mcp/auth.json`)
+- `get_auth_headers()`: Bearer token plus Granola's Electron identity headers (`X-Client-Version`, `X-Granola-Platform`, device/OS) required to pass the "Unsupported client" gate
 - `prosemirror_to_markdown()`: Recursive converter for ProseMirror JSON → Markdown (handles nested lists, headings, links, formatting)
 - `analyze_markdown_metadata()`: Extracts structural metrics (sections, bullets, word count)
 
@@ -48,7 +49,7 @@ All requests require `Authorization: Bearer {access_token}` header.
 
 ### Key Design Patterns
 
-**Authentication**: OAuth tokens read from local Granola app storage - no credential management needed
+**Authentication**: Self-refreshing — the server holds its own WorkOS refresh token in `~/.granola-mcp/auth.json` and mints access tokens via `/v1/refresh-access-token`, rather than reading Granola's (now-encrypted) local token store. Seed once with `python3 login.py`. See `granola_mcp/auth.py`.
 
 **Temp file management**: Downloads saved to `TemporaryDirectory` that auto-cleans on server shutdown
 
@@ -164,11 +165,11 @@ Deletion is soft delete via timestamp:
 
 ## Fixing Validation Errors
 
-Validation errors from `extra='forbid'` are expected when the API evolves. The error gives you a starting point (field name, value, type), but don't just pattern-match to a fix.
+With `extra='ignore'`, unknown fields Granola adds no longer raise. Validation errors now come from the fields we *do* model: a type mismatch (`strict=True` won't coerce) or a field that came back `null`/absent but isn't declared `Optional`. The error gives you a starting point (field name, value, type), but don't just pattern-match to a fix.
 
 **Before changing models, re-read `granola_mcp/models.py`** to understand existing patterns. Don't rely on memory.
 
-**Inspect the API** to understand the field: Is it always present? Can it be null? What does it represent? Use `granola_mcp/helpers.py` for auth (`get_auth_token()`, `get_auth_headers()`) - the token lives in `~/Library/Application Support/Granola/supabase.json` nested as `workos_tokens` → `access_token`.
+**Inspect the API** to understand the field: Is it always present? Can it be null? What does it represent? Use `granola_mcp/helpers.py` for auth (`get_auth_token()`, `get_auth_headers()`) - auth is self-refreshing via `granola_mcp/auth.py` (token store: `~/.granola-mcp/auth.json`).
 
 **Reason about the type**: Consider nullability, semantic meaning, whether to model nested structures. For sequences, prefer `Sequence[T]` (immutable interface) over `list[T]`. The goal is understanding, not just silencing the error.
 

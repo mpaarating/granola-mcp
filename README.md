@@ -5,11 +5,21 @@ MCP server for accessing Granola meeting notes and data via Claude Code.
 ## API Research Findings
 
 ### Authentication
-Granola uses WorkOS OAuth tokens stored locally:
-- **Location**: `~/Library/Application Support/Granola/supabase.json`
-- **Format**: JSON file with `workos_tokens` field (JSON string)
-- **Token fields**: `access_token`, `refresh_token`, `expires_in`, `session_id`
-- **Auth method**: Bearer token in Authorization header
+This server holds its **own** WorkOS refresh token rather than reading Granola's
+local token store (Granola moved that store to an encrypted `supabase.json.enc`
+keyed via the macOS Keychain, whose format is fragile and re-breaks on updates).
+See [`granola_mcp/auth.py`](granola_mcp/auth.py).
+
+- **Token store**: `~/.granola-mcp/auth.json` (this server's own file, written 0600)
+- **Refresh**: access tokens are minted on demand via
+  `POST https://api.granola.ai/v1/refresh-access-token` with body `{refresh_token}`
+  plus Granola's Electron identity headers; cached until ~2 min before expiry, with
+  rotated refresh tokens persisted automatically
+- **Auth method**: Bearer token in the Authorization header
+- **One-time setup**: seed a refresh token once with `python3 login.py` (reads the
+  token from stdin, validates it against the refresh endpoint, then saves it). If
+  `~/.granola-mcp/auth.json` is absent it bootstraps once from Granola's legacy
+  plaintext `supabase.json`, when that file still holds a live token.
 
 ### Available API Endpoints
 
@@ -104,6 +114,12 @@ These parameters would be added to the `search_meetings` tool once the Granola A
 ```bash
 # Add to Claude Code MCP config (user scope)
 claude mcp add --scope user --transport stdio granola -- uv run --script ~/granola-mcp/granola-mcp.py
+```
+
+Then seed the auth token once (see [Authentication](#authentication)):
+
+```bash
+python3 login.py   # paste a Granola refresh token; it is validated and saved to ~/.granola-mcp/auth.json
 ```
 
 ## Available Tools

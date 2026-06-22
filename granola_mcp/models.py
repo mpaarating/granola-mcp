@@ -281,7 +281,9 @@ class GoogleCalendarEvent(BaseModel):
     originalStartTime: GoogleCalendarTime | None = None
     guestsCanSeeOtherGuests: bool | None = None
     extendedProperties: Mapping[str, Mapping[str, str]] | None = None
-    displayLocations: DisplayLocations | None = None  # Added by Google Calendar API ~Apr 2026
+    displayLocations: DisplayLocations | None = (
+        None  # Added by Google Calendar API ~Apr 2026
+    )
 
 
 class ProseMirrorAttrs(BaseModel):
@@ -332,7 +334,9 @@ class LastViewedPanel(BaseModel):
     generated_lines: Sequence[GeneratedLine] | None = None
     ydoc_state: str | None = None  # Y.js document state
     ydoc_version: int | None = None  # Y.js document version
-    has_speaker_attribution: bool | None = None  # New field - whether the panel has speaker attribution
+    has_speaker_attribution: bool | None = (
+        None  # New field - whether the panel has speaker attribution
+    )
 
 
 # Main document model
@@ -378,7 +382,9 @@ class GranolaDocument(BaseModel):
     affinity_note_id: None = None  # Always null
     show_private_notes: bool | None
     attachments: Sequence[DocumentAttachment] | None
-    hubspot_note_url: None = None  # Always null
+    hubspot_note_url: str | None = (
+        None  # URL for HubSpot-integrated meetings, else null
+    )
     status: str | None = None
     external_transcription_id: str | None = None
     audio_file_handle: str | None = None
@@ -396,7 +402,9 @@ class GranolaDocument(BaseModel):
     is_primary_event_note: bool | None = None  # Primary note for calendar event
     ydoc_state: str | None = None  # Y.js document state
     ydoc_version: int | None = None  # Y.js document version
-    zoom_rtms_permission: str | None = None  # Zoom RTMS permission for bot-free media streaming
+    zoom_rtms_permission: str | None = (
+        None  # Zoom RTMS permission for bot-free media streaming
+    )
     document_user_role: str | None = None  # User's role for this document
     is_scratchpad: bool | None = None  # Whether document is a scratchpad
 
@@ -570,7 +578,9 @@ class DocumentPanel(BaseModel):
     generated_lines: Sequence[GeneratedLine] | None = None
     user_feedback: None = None
     ydoc_version: int | None = None  # Y.js document version
-    has_speaker_attribution: bool | None = None  # New field - whether the panel has speaker attribution
+    has_speaker_attribution: bool | None = (
+        None  # New field - whether the panel has speaker attribution
+    )
 
 
 class NoteDownloadResult(BaseModel):

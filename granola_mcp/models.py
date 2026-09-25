@@ -329,7 +329,7 @@ class LastViewedPanel(BaseModel):
     updated_at: str | None = None
     content_updated_at: str | None = None
     affinity_note_id: None = None
-    original_content: str | None = None
+    original_content: ProseMirrorDoc | str | None = None
     suggested_questions: None = None
     generated_lines: Sequence[GeneratedLine] | None = None
     ydoc_state: str | None = None  # Y.js document state
@@ -573,7 +573,7 @@ class DocumentPanel(BaseModel):
     updated_at: str
     content_updated_at: str | None = None
     affinity_note_id: str | None = None
-    original_content: str | None = None  # Always HTML string
+    original_content: ProseMirrorDoc | str | None = None  # ProseMirror JSON or HTML
     suggested_questions: Sequence[str] | None = None
     generated_lines: Sequence[GeneratedLine] | None = None
     user_feedback: None = None

@@ -38,6 +38,13 @@ from granola_mcp.helpers import (
     get_auth_headers,
     prosemirror_to_markdown,
 )
+from granola_mcp.doc_index import (
+    DOCUMENT_SET_TTL_SECONDS,
+    doc_has_notes,
+    is_cached_doc_fresh,
+    matches_source,
+    may_be_created_since,
+)
 from granola_mcp.logging import DualLogger
 from granola_mcp.models import (
     AssemblyAISegment,
@@ -111,13 +118,13 @@ def _extract_document_id(url: str) -> str | None:
     return match.group(1) if match else None
 
 
-@cached(ttl=None, cache=Cache.MEMORY)
+@cached(ttl=DOCUMENT_SET_TTL_SECONDS, cache=Cache.MEMORY)
 async def _get_document_set_cached() -> DocumentSetResponse:
     """
-    Fetch the lightweight document index (owned + shared + deleted).
+    Fetch the lightweight document index (owned + shared + workspace + deleted).
 
     Returns all document IDs with ownership flags and updated_at timestamps.
-    Cached for the lifetime of the MCP server session (cleared on restart).
+    Cached for DOCUMENT_SET_TTL_SECONDS so meetings recorded mid-session appear.
     """
     headers = get_auth_headers()
     url = 'https://api.granola.ai/v1/get-document-set'
@@ -126,8 +133,9 @@ async def _get_document_set_cached() -> DocumentSetResponse:
     return DocumentSetResponse.model_validate(response.json())
 
 
-# Per-document cache for batch fetch results (session lifetime)
-_document_cache: dict[str, object] = {}
+# Per-document cache: doc_id -> (index updated_at when fetched, document).
+# An entry is refetched once the index reports a newer updated_at.
+_document_cache: dict[str, tuple[str | None, object]] = {}
 
 
 async def _invalidate_caches_for_document(
@@ -151,8 +159,9 @@ async def _get_documents_by_ids(document_ids: list[str]) -> list:
     """
     Fetch documents by IDs, using per-document cache.
 
-    Checks the cache first, only fetches uncached IDs from the API.
-    Stores results back into the cache for future calls.
+    Serves cached documents while the index still reports the same updated_at,
+    and refetches the rest from the API (so AI summaries written after the first
+    fetch come through). Stores results back into the cache.
 
     Args:
         document_ids: List of document IDs to fetch
@@ -160,12 +169,15 @@ async def _get_documents_by_ids(document_ids: list[str]) -> list:
     Returns:
         List of GranolaDocument objects (order not guaranteed)
     """
-    # Split into cached and uncached
+    index = (await _get_document_set_cached()).documents
+
+    # Split into fresh cached and needs-fetch
     cached_docs = []
     uncached_ids = []
     for doc_id in document_ids:
-        if doc_id in _document_cache:
-            cached_docs.append(_document_cache[doc_id])
+        cached = _document_cache.get(doc_id)
+        if cached and is_cached_doc_fresh(cached[0], index.get(doc_id)):
+            cached_docs.append(cached[1])
         else:
             uncached_ids.append(doc_id)
 
@@ -179,13 +191,14 @@ async def _get_documents_by_ids(document_ids: list[str]) -> list:
         headers = get_auth_headers()
         response = await _http_client.post(
             'https://api.granola.ai/v1/get-documents-batch',
-            json={'document_ids': chunk_ids},
+            json={'document_ids': chunk_ids, 'include_last_viewed_panel': True},
             headers=headers,
         )
         response.raise_for_status()
         data = BatchDocumentsResponse.model_validate(response.json())
         for doc in data.docs:
-            _document_cache[doc.id] = doc
+            entry = index.get(doc.id)
+            _document_cache[doc.id] = (entry.updated_at if entry else None, doc)
             fetched_docs.append(doc)
 
     return cached_docs + fetched_docs
@@ -262,7 +275,7 @@ async def list_meetings(
     list_id: str | None = None,
     created_at_gte: str | None = None,
     created_at_lte: str | None = None,
-    source: Literal['all', 'owned', 'shared'] = 'all',
+    source: Literal['all', 'owned', 'shared', 'workspace'] = 'all',
     # Control parameters
     limit: int = 20,
     include_participants: bool = False,
@@ -270,8 +283,9 @@ async def list_meetings(
     """
     List Granola meetings with optional filtering.
 
-    Uses the document set index to discover all meetings (owned + shared),
-    then batch-fetches full details. Results are cached per session.
+    Uses the document set index to discover meetings, then batch-fetches full
+    details. The index is cached for a few minutes; documents are refetched when
+    the index reports them as updated.
 
     Args:
         title_contains: Optional substring to filter by title
@@ -279,7 +293,9 @@ async def list_meetings(
         list_id: Optional list ID to filter meetings by list (only works with source='owned')
         created_at_gte: Filter meetings created on or after this date (ISO 8601: "YYYY-MM-DD")
         created_at_lte: Filter meetings created on or before this date (ISO 8601: "YYYY-MM-DD")
-        source: Which meetings to include: 'all' (default), 'owned', or 'shared'
+        source: Which meetings to include: 'all' (default: owned + shared with you),
+            'owned' (you recorded it), 'shared' (shared with you), or 'workspace'
+            (other people's notes visible via your workspace; not meetings you attended)
         limit: Maximum number of meetings to return. Use 0 to return all (default: 20)
         include_participants: Include full participant details (default: False for efficiency)
 
@@ -295,12 +311,11 @@ async def list_meetings(
     # Filter by source and build sorted entry list
     entries = []
     for doc_id, entry in doc_set.documents.items():
-        is_shared = bool(entry.shared)
-        if source == 'owned' and is_shared:
+        if not matches_source(entry, source):
             continue
-        if source == 'shared' and not is_shared:
+        if not may_be_created_since(entry, created_at_gte):
             continue
-        entries.append((doc_id, entry.updated_at, is_shared))
+        entries.append((doc_id, entry.updated_at, bool(entry.shared)))
 
     # Sort by updated_at descending (most recent first)
     entries.sort(key=lambda x: x[1], reverse=True)
@@ -403,7 +418,7 @@ async def list_meetings(
                     title=doc.title or '(Untitled)',
                     created_at=convert_utc_to_local(doc.created_at),
                     type=doc.type,
-                    has_notes=bool(doc.notes or doc.notes_markdown),
+                    has_notes=doc_has_notes(doc),
                     participant_count=participant_count,
                     is_shared=is_shared_map.get(doc.id, False),
                     participants=participants,
@@ -857,7 +872,7 @@ async def get_meetings(document_ids: list[str], ctx: Context) -> list[MeetingLis
                 title=doc.title or '(Untitled)',
                 created_at=convert_utc_to_local(doc.created_at),
                 type=doc.type,
-                has_notes=bool(doc.notes or doc.notes_markdown),
+                has_notes=doc_has_notes(doc),
                 participant_count=participant_count,
                 is_shared=is_shared,
                 participants=participants,
@@ -1078,7 +1093,7 @@ async def list_deleted_meetings(ctx: Context) -> list[MeetingListItem]:
             title=doc.title or '(Untitled)',
             created_at=convert_utc_to_local(doc.created_at),
             type=doc.type,
-            has_notes=bool(doc.notes or doc.notes_markdown),
+            has_notes=doc_has_notes(doc),
             participant_count=len(doc.people.attendees) if doc.people else 0,
             is_shared=False,
         )
